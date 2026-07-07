@@ -1,0 +1,71 @@
+# Label guard — ensure every plan issue carries the required labels.
+#
+# Plans are filed via `gh issue create --label status:… --label subject:…`
+# (freeform — there is no issue form), and agents often omit them.  On issue
+# open/edit/(un)label this auto-applies a `status:*` chosen in the body and then
+# flags `needs:labels` + a one-time comment when a required category is missing.
+# Self-clears once labelled; loop-safe (GITHUB_TOKEN label edits don't re-trigger).
+name: Label guard
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+
+permissions:
+  issues: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const number = issue.number;
+            const body = issue.body || "";
+            const labels = new Set((issue.labels || []).map(l => l.name));
+            const NEEDS = "needs:labels";
+
+            // Every plan needs exactly one status: and one subject:.
+            const categories = [
+              { key: "status:",  name: "status — one `status:active` / `next` / `future` / `closing` / `finished` / `parked`" },
+              { key: "subject:", name: "subject — one `subject:*` (e.g. `subject:loft`)" },
+            ];
+            // Auto-apply a status: token found in the body (only the known set, so
+            // no stray label is ever created).  subject: is an open set — enforced,
+            // not auto-applied, to avoid inventing a label from prose.
+            const validStatus = new Set([
+              "status:active","status:next","status:future",
+              "status:closing","status:finished","status:parked",
+            ]);
+            const found = new Set();
+            for (const m of body.matchAll(/\bstatus:[a-z0-9-]+/g)) found.add(m[0]);
+            const toApply = [...found].filter(l => validStatus.has(l) && !labels.has(l));
+            if (toApply.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: toApply });
+              toApply.forEach(l => labels.add(l));
+            }
+
+            const missing = categories.filter(c => ![...labels].some(l => l.startsWith(c.key)));
+            const flagged = labels.has(NEEDS);
+
+            if (missing.length === 0) {
+              if (flagged) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: NEEDS })
+                  .catch(() => {});
+              }
+              return;
+            }
+
+            if (!flagged) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [NEEDS] });
+              const list = missing.map(c => `- **${c.name}**`).join("\n");
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `This plan issue is missing required labels:\n\n${list}\n\n`
+                  + `Apply one label from each missing category. `
+                  + `The \`${NEEDS}\` flag clears automatically once they are set.`,
+              });
+            }
