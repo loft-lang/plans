@@ -4,6 +4,10 @@
 # (freeform — there is no issue form), and agents often omit them.  On issue
 # open/edit/(un)label this auto-applies a `status:*` chosen in the body and then
 # flags `needs:labels` + a one-time comment when a required category is missing.
+#
+# The auto-apply FILLS A GAP and never overrides: it acts only when the issue has
+# no `status:*` at all AND the body names exactly one.  Both conditions are load-
+# bearing — see the comment at the apply site.
 # Self-clears once labelled; loop-safe (GITHUB_TOKEN label edits don't re-trigger).
 name: Label guard
 
@@ -42,7 +46,23 @@ jobs:
             ]);
             const found = new Set();
             for (const m of body.matchAll(/\bstatus:[a-z0-9-]+/g)) found.add(m[0]);
-            const toApply = [...found].filter(l => validStatus.has(l) && !labels.has(l));
+            const candidates = [...found].filter(l => validStatus.has(l));
+            const hasStatus = [...labels].some(l => l.startsWith("status:"));
+            // FILL A GAP — never override a decision.  Two conditions, each earned:
+            //
+            //  - the issue must carry NO status label yet.  This job also runs on
+            //    `unlabeled`, so re-applying a status the body merely MENTIONS made a
+            //    deliberate removal impossible: @PLN111's own § Disposition described
+            //    the transition it had already made ("flips `status:future` →
+            //    `status:parked`"), and the guard put the old label back ~10s after each
+            //    removal, twice, until the prose was reworded.  Auto-apply exists for the
+            //    agent who FORGOT a label, not to argue with one who set it.
+            //  - the body must name EXACTLY ONE status.  The regex cannot tell a
+            //    declaration from a mention — it matches inside backticks and prose — so
+            //    a plan that discusses its own transition names two, and picking either
+            //    is a guess.  Ambiguity falls through to the `needs:labels` path below,
+            //    which asks a human instead of inventing an answer.
+            const toApply = !hasStatus && candidates.length === 1 ? candidates : [];
             if (toApply.length) {
               await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: toApply });
               toApply.forEach(l => labels.add(l));
